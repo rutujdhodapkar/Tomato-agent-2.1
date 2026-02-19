@@ -1,137 +1,116 @@
-import streamlit as st
-import requests
 import base64
+import io
 import json
 import os
-import hashlib
-import uuid
-import io
-import time
 from datetime import datetime
-from PIL import Image
-import matplotlib.pyplot as plt
+import time
+
+import requests
+import streamlit as st
 from matplotlib.backends.backend_pdf import PdfPages
+import matplotlib.pyplot as plt
+from PIL import Image
 
 # ================= CONFIG ================= #
-
+# API key intentionally kept in-code per requirement.
 OPENROUTER_API_KEY = "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"
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
+MODEL_NAME = "nvidia/nemotron-nano-12b-v2-vl:free"
 VISION_MODEL = "nvidia/nemotron-nano-12b-v2-vl:free"
 REASONING_MODEL = "openai/gpt-oss-120b:free"
 USER_DB = "users.json"
 EXPORT_DIR = "exports"
 
-# ================= SESSION ================= #
+# ================= ACTION MAP ================= #
+ACTION_MAP = {
+    "Soil moisture modeling": "Analyze soil moisture modeling with sensor + weather assumptions and actionable irrigation guidance.",
+    "Water requirement prediction": "Predict farm water requirement for next 14 days by crop stage and weather uncertainty.",
+    "AI-driven irrigation schedule": "Create AI-driven irrigation schedule with time windows and liters/acre.",
+    "Drought early warning": "Generate drought early warning indicators for 30 days.",
+    "Water waste optimization %": "Estimate current water waste percentage and optimization opportunities.",
+    "NPK prediction": "Predict nitrogen, phosphorus, potassium levels and corrective plan.",
+    "pH imbalance detection": "Detect pH imbalance and recommend treatment protocol.",
+    "Nutrient deficiency fusion": "Use leaf + soil fusion assumptions to identify nutrient deficiencies.",
+    "Fertilizer recommendation": "Build fertilizer recommendation engine output for this farm.",
+    "Long-term soil health score": "Estimate long-term soil health score and yearly action plan.",
+    "Insect classification": "Classify likely insects and risk level by season.",
+    "Pest density estimation": "Estimate pest density per acre with intervention threshold.",
+    "Swarm detection": "Detect swarm risk and alert plan.",
+    "Migration pattern prediction": "Predict wind-based pest migration pattern over 7 days.",
+    "Smart pesticide timing": "Recommend ideal pesticide application timing.",
+    "Satellite imagery integration": "Provide satellite imagery integration plan and inferred crop signals.",
+    "Growth stage tracking": "Track crop growth stage and next milestones.",
+    "Production estimate per acre": "Estimate production per acre with confidence range.",
+    "Profit forecast": "Generate profit forecast using yield, costs, and market price assumptions.",
+    "Market price integration": "Integrate market price trend and suggest sell timing.",
+    "Camera→Analyze→Recommend→Auto-execute": "Design camera-to-execution pipeline with automation gates.",
+    "Irrigation valve control": "Generate irrigation valve control logic and failsafe.",
+    "Sprayer control": "Generate smart sprayer control strategy.",
+    "Drone-based spraying": "Plan drone-based spraying route and timing.",
+    "Automated farm reporting": "Create automated farm reporting template and KPI plan.",
+    "Multi-modal fusion model": "Design fusion model: Vision + Weather + Soil + Time.",
+    "Disease risk 7-30 days": "Predict disease risk for 7-30 days using humidity + temperature.",
+    "Frost risk alerts": "Predict frost risk and preventive actions.",
+    "Heat stress prediction": "Predict heat stress windows and protection actions.",
+    "Crop growth stage mapping": "Generate crop growth stage map from multimodal data.",
+    "Price prediction AI": "Calculate total crop production cost and expected local market gain/profit.",
+    "Full Agent Pipeline": "Build one proper end-to-end AI agent pipeline using Vision/Climate/Soil/Water/Market/Execution layers.",
+}
 
-def init_session():
-    defaults = {
-        "logged_in": False,
-        "username": None,
-        "menu": "Home",
-        "chat_history": [],
-        "detection_result": None,
-        "task_queue": [],
-        "reports": [],
-        "cost_result": None
-    }
-    for k, v in defaults.items():
-        if k not in st.session_state:
-            st.session_state[k] = v
 
-# ================= AUTH ================= #
-
-def init_user_db():
-    if not os.path.exists(USER_DB):
-        with open(USER_DB, "w") as f:
-            json.dump({}, f)
-
-def load_users():
-    with open(USER_DB, "r") as f:
-        return json.load(f)
-
-def save_users(users):
-    with open(USER_DB, "w") as f:
-        json.dump(users, f, indent=4)
-
-def hash_password(p):
-    return hashlib.sha256(p.encode()).hexdigest()
-
-def auth_page():
-    st.title("🌾 Farm AI Authentication")
-    mode = st.radio("Mode", ["Login", "Sign Up"], horizontal=True)
-
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
-
-    users = load_users()
-
-    if mode == "Sign Up":
-        if st.button("Create Account"):
-            if not username or not password:
-                st.error("All fields required")
-                return
-            if username in users:
-                st.error("Username exists")
-                return
-            users[username] = {
-                "password": hash_password(password),
-                "id": str(uuid.uuid4())
-            }
-            save_users(users)
-            st.success("Account created. Login now.")
-            st.rerun()
-
-    else:
-        if st.button("Login"):
-            if username not in users:
-                st.error("User not found")
-                return
-            if hash_password(password) == users[username]["password"]:
-                st.session_state.logged_in = True
-                st.session_state.username = username
-                st.rerun()
-            else:
-                st.error("Wrong password")
-
-# ================= API ================= #
-
-def call_openrouter(messages, model):
+def call_openrouter(messages, model=REASONING_MODEL):
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
     }
     payload = {"model": model, "messages": messages}
-    r = requests.post(OPENROUTER_URL, headers=headers, json=payload)
+    try:
+        response = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=60)
+        
+        # 🔥 Check status first
+        if response.status_code != 200:
+            return f"HTTP Error {response.status_code}: {response.text}"
 
-    if r.status_code != 200:
-        return f"Error {r.status_code}: {r.text}"
+        # 🔥 Ensure JSON response
+        if "application/json" not in response.headers.get("Content-Type", ""):
+            return f"API returned non-JSON response:\n{response.text[:500]}"
 
-    data = r.json()
-    if "choices" in data:
-        return data["choices"][0]["message"]["content"]
-    return "Unexpected response"
+        data = response.json()
+        if "choices" in data:
+            return data["choices"][0]["message"]["content"]
+        if "error" in data:
+            return f"API Error: {data['error'].get('message')}"
+        return f"Unexpected format: {data}"
+    except requests.exceptions.RequestException as e:
+        return f"Network Error: {str(e)}"
 
-# ================= VISION ================= #
 
-def analyze_image(img_bytes, location):
-    img_base64 = base64.b64encode(img_bytes).decode()
-
+def run_reasoning_model(image_bytes, species_info):
+    base64_image = base64.b64encode(image_bytes).decode('utf-8')
+    
     prompt = f"""
-Analyze this crop image.
-Location: {location}
+    Analyze this plant image and the provided metadata. 
+    Metadata: {json.dumps(species_info)}
 
-Return ONLY valid JSON:
-{{
-"crop_name":"",
-"disease_name":"",
-"description":"",
-"solution":"",
-"fertilizers":"",
-"soil_insights":"",
-"water_forecast":"",
-"risk_score":""
-}}
-"""
+    Identify:
+    1. The specific Crop/Plant name.
+    2. The most likely Disease or Health Issue (if any). If healthy, state 'Healthy'.
+    3. Local soil health trend (nutrients, pH, moisture) based on common conditions for the location and crop.
+    4. Water forecast & irrigation suggestions for the next 7 days.
+    5. Overall risk score (Low / Medium / High).
+
+    Return ONLY valid JSON in this structure:
+    {{
+        "crop_name": "Name of the crop",
+        "disease_name": "Name of the disease or 'Healthy'",
+        "description": "Brief description of the crop and disease condition",
+        "solution": "Step-by-step solution to fix the issue or care instructions if healthy",
+        "fertilizers": "Recommended fertilizers or nutrients for this specific condition and crop",
+        "soil_insights": "Detailed soil health insights (nutrients, pH, moisture)",
+        "water_forecast": "Water forecast and irrigation plan",
+        "risk_score": "Low/Medium/High"
+    }}
+    """
 
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -139,225 +118,371 @@ Return ONLY valid JSON:
     }
 
     payload = {
-        "model": VISION_MODEL,
-        "messages": [{
-            "role": "user",
-            "content": [
-                {"type": "text", "text": prompt},
-                {
-                    "type": "image_url",
-                    "image_url": {"url": f"data:image/jpeg;base64,{img_base64}"}
-                }
-            ]
-        }]
+        "model": MODEL_NAME,
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": f"data:image/jpeg;base64,{base64_image}"
+                        }
+                    }
+                ]
+            }
+        ]
     }
 
-    r = requests.post(OPENROUTER_URL, headers=headers, json=payload)
+    response = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=60)
+    
+    if response.status_code != 200:
+        return {"error": f"HTTP Error {response.status_code}: {response.text}"}
 
-    if r.status_code != 200:
-        return {"error": r.text}
-
-    output = r.json()["choices"][0]["message"]["content"]
+    if "application/json" not in response.headers.get("Content-Type", ""):
+        return {"error": "API returned non-JSON response", "raw": response.text[:500]}
 
     try:
-        if "```" in output:
-            output = output.split("```")[1]
-        return json.loads(output)
-    except:
-        return {"error": "Parsing failed"}
+        result = response.json()
+    except requests.exceptions.JSONDecodeError:
+         return {"error": "Failed to decode JSON", "raw": response.text[:500]}
 
-# ================= COST ENGINE ================= #
+    if "choices" not in result:
+        err_msg = "Unknown error"
+        if "error" in result:
+            err_msg = result["error"].get("message", "Unknown error")
+        return {"error": f"API Error: {err_msg}", "raw_response": result}
 
-def cost_estimation(location, crop, acres, investment):
-    prompt = f"""
-Location: {location}
-Crop: {crop}
-Acres: {acres}
-Investment: {investment}
+    try:
+        output_text = result["choices"][0]["message"]["content"]
+        # Remove markdown code blocks if present
+        if "```json" in output_text:
+            output_text = output_text.split("```json")[1].split("```")[0].strip()
+        elif "```" in output_text:
+            output_text = output_text.split("```")[1].split("```")[0].strip()
+            
+        return json.loads(output_text)
+    except Exception as e:
+        return {"error": f"Reasoning model failed to parse output: {str(e)}", "raw_response": result}
 
-Provide JSON:
-{{
-"market_price":"",
-"best_months":"",
-"total_cost":"",
-"expected_revenue":"",
-"profit_or_loss":"",
-"recommendation":""
-}}
-"""
-    result = call_openrouter(
-        [
-            {"role": "system", "content": "You are an agricultural economist."},
-            {"role": "user", "content": prompt}
-        ],
-        REASONING_MODEL
-    )
-    return result
 
-# ================= TASK AGENT ================= #
+def ensure_session_defaults():
+    defaults = {
+        "menu_choice": "Home",
+        "agent_status": "Idle",
+        "task_queue": [],
+        "reports": [],
+        "chat_history": [],
+        "detection_result": None,
+        "location": "",
+        "cost_estimation": None,
+    }
 
-def queue_task(title, prompt):
-    st.session_state.task_queue.append({"title": title, "prompt": prompt})
+    for key, value in defaults.items():
+        if key not in st.session_state:
+            st.session_state[key] = value
 
-def run_tasks():
+
+
+
+def queue_task(task_name, prompt, model=REASONING_MODEL):
+    st.session_state.task_queue.append({"task": task_name, "prompt": prompt, "model": model})
+
+
+def run_all_background_tasks():
     while st.session_state.task_queue:
         task = st.session_state.task_queue.pop(0)
-        result = call_openrouter(
+        st.session_state.agent_status = f"Running: {task['task']}"
+        
+        report = call_openrouter(
             [
-                {"role": "system", "content": "Generate structured operational farm report."},
-                {"role": "user", "content": task["prompt"]}
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an agricultural super-agent. "
+                        "Give structured operational report with metrics, risk score, timeline, ROI impact."
+                    ),
+                },
+                {"role": "user", "content": task["prompt"]},
             ],
-            REASONING_MODEL
+            task["model"],
         )
-        st.session_state.reports.insert(0, {
-            "time": datetime.now().strftime("%Y-%m-%d %H:%M"),
-            "title": task["title"],
-            "content": result
-        })
 
-# ================= EXPORT ================= #
+        st.session_state.reports.insert(
+            0,
+            {
+                "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "title": task["task"],
+                "content": report,
+            },
+        )
 
-def export_chat():
+    st.session_state.agent_status = "All tasks completed"
+
+
+def export_chat_to_pdf():
     os.makedirs(EXPORT_DIR, exist_ok=True)
-    path = os.path.join(EXPORT_DIR, f"chat_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
+    path = os.path.join(EXPORT_DIR, f"chat_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf")
 
-    lines = []
-    for m in st.session_state.chat_history:
-        lines.append(f"[{m['time']}] {m['role']}: {m['text']}")
+    lines = ["AI Agent Chat Export", ""]
+    for msg in st.session_state.chat_history:
+        lines.append(f"[{msg['time']}] {msg['role'].upper()}: {msg['text']}")
 
+    page_lines = 35
     with PdfPages(path) as pdf:
-        fig = plt.figure(figsize=(8.27, 11.69))
-        fig.text(0.05, 0.95, "\n".join(lines), va="top", fontsize=9)
-        plt.axis("off")
-        pdf.savefig(fig)
-        plt.close(fig)
+        for i in range(0, max(len(lines), 1), page_lines):
+            fig = plt.figure(figsize=(8.27, 11.69))
+            fig.patch.set_facecolor('white')
+            text_chunk = "\n".join(lines[i:i + page_lines]) or "No chat messages to export."
+            fig.text(0.05, 0.95, text_chunk, va='top', fontsize=9, family='sans-serif', wrap=True)
+            plt.axis('off')
+            pdf.savefig(fig)
+            plt.close(fig)
 
     return path
 
-# ================= UI ================= #
 
-def sidebar():
-    with st.sidebar:
-        st.title("🤖 Farm AI")
-        st.session_state.menu = st.radio("Navigation", ["Home", "Chat", "Reports", "Cost"])
-        st.write("User:", st.session_state.username)
 
-        if st.button("Logout"):
-            st.session_state.logged_in = False
-            st.rerun()
 
-# ================= PAGES ================= #
 
-def home():
-    st.title("🌾 Crop Intelligence")
 
-    location = st.text_input("Farm Location")
-    file = st.file_uploader("Upload Leaf Image", type=["jpg","png","jpeg"])
+def home_page():
+    st.markdown("## 🌾 Agricultural Intelligence Dashboard")
 
-    if file:
-        img = Image.open(file)
-        st.image(img, use_container_width=True)
+    uploaded_image = st.file_uploader("Upload Leaf Image", type=["jpg", "jpeg", "png"])
+
+    if uploaded_image:
+        image = Image.open(uploaded_image)
+        st.image(image, use_container_width=True)
 
         if st.button("Analyze"):
             buffer = io.BytesIO()
-            img.save(buffer, format="JPEG")
-            result = analyze_image(buffer.getvalue(), location)
+            image.save(buffer, format="JPEG")
+            img_bytes = buffer.getvalue()
+
+            with st.spinner("Running full intelligence pipeline..."):
+                result = run_reasoning_model(
+                    img_bytes,
+                    {"location": st.session_state.location}
+                )
+
             st.session_state.detection_result = result
 
     if st.session_state.detection_result:
-        r = st.session_state.detection_result
-        if "error" in r:
-            st.error(r["error"])
-            return
+        res = st.session_state.detection_result
 
-        st.success(r.get("crop_name","Unknown"))
-        st.warning(r.get("disease_name","Healthy"))
-        st.info(r.get("description","No description"))
-        st.success(r.get("solution","No solution"))
-        st.info(r.get("fertilizers","No fertilizer"))
-        st.write("Soil:", r.get("soil_insights",""))
-        st.write("Water:", r.get("water_forecast",""))
-        st.error("Risk:", r.get("risk_score","Unknown"))
+        st.markdown("---")
+        st.markdown("### 🧬 Crop Identified")
+        st.write(res.get("crop_name", "Unknown"))
 
-def chat():
-    st.title("💬 Farm AI Chat")
+        st.markdown("### 🛑 Disease Status")
+        st.write(res.get("disease_name", "Healthy"))
 
-    for m in st.session_state.chat_history:
-        with st.chat_message(m["role"]):
-            st.markdown(m["text"])
+        st.markdown("---")
 
-    user_input = st.chat_input("Ask about farming...")
+        st.markdown("### 🧠 Description")
+        st.write(res.get("description", ""))
 
-    if user_input:
-        st.session_state.chat_history.append({
-            "role":"user",
-            "text":user_input,
-            "time":datetime.now().strftime("%H:%M:%S")
-        })
+        st.markdown("### 🛠 Solution")
+        st.write(res.get("solution", ""))
 
-        with st.chat_message("assistant"):
-            response = call_openrouter(
+        st.markdown("### 🧪 Fertilizers")
+        st.write(res.get("fertilizers", ""))
+
+        st.markdown("### 📊 Soil Insights")
+        st.write(res.get("soil_insights", ""))
+
+        st.markdown("### 💧 Water Forecast")
+        st.write(res.get("water_forecast", ""))
+
+        st.markdown("### 📈 Risk Level")
+        st.write(res.get("risk_score", ""))
+
+
+def chat_page():
+    st.title("💬 Agent Chat")
+    
+    # Chat container for scrollable messages
+    chat_container = st.container()
+    
+    with chat_container:
+        for msg in st.session_state.chat_history:
+            with st.chat_message(msg['role']):
+                st.markdown(f"*{msg['time']}*")
+                st.write(msg['text'])
+
+    query = st.chat_input("Ask about farming, costs, irrigation, market, disease...")
+    if query:
+        st.session_state.chat_history.append(
+            {"time": datetime.now().strftime("%H:%M:%S"), "role": "user", "text": query}
+        )
+        with st.spinner("Agent is thinking..."):
+            answer = call_openrouter(
                 [
-                    {"role":"system","content":"You are an advanced agricultural AI."},
-                    {"role":"user","content":user_input}
-                ],
-                REASONING_MODEL
+                    {"role": "system", "content": "You are a practical agricultural AI agent."},
+                    {"role": "user", "content": query},
+                ]
             )
-            st.markdown(response)
-
-        st.session_state.chat_history.append({
-            "role":"assistant",
-            "text":response,
-            "time":datetime.now().strftime("%H:%M:%S")
-        })
-
+        st.session_state.chat_history.append(
+            {"time": datetime.now().strftime("%H:%M:%S"), "role": "assistant", "text": answer}
+        )
         st.rerun()
 
-def reports():
-    st.title("📊 Agent Reports")
 
-    if st.button("Run Soil Analysis"):
-        queue_task("Soil Analysis", "Generate soil health operational report.")
-    if st.button("Run Market Forecast"):
-        queue_task("Market Forecast", "Generate crop market forecast.")
+def shop_or_doctors_page(title, actor):
+    st.title(title)
+    col_in1, col_in2 = st.columns(2)
+    with col_in1:
+        crop = st.text_input(f"{actor}: Crop name")
+    with col_in2:
+        requirement = st.text_input(f"{actor}: Requirement")
 
-    if st.button("Execute Tasks"):
-        run_tasks()
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button(f"Search {actor}"):
+            with st.spinner(f"Finding the best {actor.lower()}s for you..."):
+                location = st.session_state.get('location', 'unknown location')
+                search_prompt = f"As an agricultural AI, find/recommend 5 {actor.lower()}s or services for {crop} with requirement: {requirement} near {location}. Provide name, contact detail (simulated), and specialized service. Format as a clean list."
+                response = call_openrouter([{"role": "user", "content": search_prompt}])
+                if "error" not in response.lower() or "401" not in response:
+                    st.success(f"Found {actor}s!")
+                    st.markdown(response)
+                else:
+                    st.error(f"Search failed: {response}")
 
-    for r in st.session_state.reports:
-        with st.expander(f"{r['title']} ({r['time']})"):
-            st.write(r["content"])
+    with col2:
+        if st.button("Show all nearby"):
+            with st.spinner(f"Listing all major {actor.lower()} options..."):
+                search_prompt = f"List all major {actor.lower()} options for {crop} farming. Include pricing estimates and usage summary."
+                response = call_openrouter([{"role": "user", "content": search_prompt}])
+                st.markdown(response)
 
-def cost():
-    st.title("💰 Cost Estimation")
 
-    loc = st.text_input("Location")
-    crop = st.text_input("Crop")
-    acres = st.number_input("Acres", 0.0)
-    invest = st.number_input("Investment", 0.0)
+def contact_page():
+    st.title("📞 Contact")
+    st.markdown(
+        """
+        **AI Farm Agent Team**  
+        Email: support@aifarmagent.local  
+        Services: Vision, Climate, Soil, Water, Market, Execution  
+        """
+    )
 
-    if st.button("Estimate"):
-        st.session_state.cost_result = cost_estimation(loc, crop, acres, invest)
 
-    if st.session_state.cost_result:
-        st.write(st.session_state.cost_result)
+def show_reports_panel():
+    st.markdown("## 📊 Generated Reports")
+    if not st.session_state.reports:
+        st.info("No reports yet. Run analyses from the left panel.")
+        return
+    for report in st.session_state.reports[:12]:
+        with st.expander(f"{report['time']} — {report['title']}"):
+            st.write(report["content"])
 
-# ================= MAIN ================= #
 
-init_user_db()
-init_session()
+def main():
+    st.set_page_config(page_title="Agri Super Agent", layout="wide")
+    ensure_session_defaults()
 
-if not st.session_state.logged_in:
-    auth_page()
-    st.stop()
+    run_all_background_tasks()
 
-sidebar()
+    # ---------- TOP NAVBAR ----------
+    nav_cols = st.columns(5)
 
-if st.session_state.menu == "Home":
-    home()
-elif st.session_state.menu == "Chat":
-    chat()
-elif st.session_state.menu == "Reports":
-    reports()
-else:
-    cost()
+    menu_items = ["Home", "Chat", "Shop", "Doctors", "Contact"]
+
+    for i, item in enumerate(menu_items):
+        if nav_cols[i].button(
+            item,
+            use_container_width=True,
+            type="primary" if st.session_state.menu_choice == item else "secondary"
+        ):
+            st.session_state.menu_choice = item
+            st.rerun()
+
+    st.markdown("---")
+
+    # ---------- MAIN LAYOUT ----------
+    left_col, right_col = st.columns([1, 2])
+
+    with left_col:
+        st.markdown("## 🧠 Agent Panel")
+        st.write(f"Status: {st.session_state.agent_status}")
+        st.markdown("---")
+
+        st.subheader("📍 Farm Info")
+        st.session_state.location = st.text_input("Farm location")
+
+        st.markdown("---")
+
+        st.subheader("⚙ Quick Actions")
+
+        selected_action = st.selectbox("Select analysis", list(ACTION_MAP.keys()))
+
+        if st.button("Run Analysis", use_container_width=True):
+            queue_task(selected_action, ACTION_MAP[selected_action])
+            st.success("Queued.")
+
+        if st.button("Run Full Pipeline", use_container_width=True):
+            for action, prompt in ACTION_MAP.items():
+                queue_task(action, prompt)
+            st.success("Full pipeline queued.")
+
+    with right_col:
+
+        menu = st.session_state.menu_choice
+
+        if menu == "Home":
+            home_page()
+        elif menu == "Chat":
+            chat_page()
+        elif menu == "Shop":
+            shop_or_doctors_page("🛒 Fertilizer Shop", "Shop")
+        elif menu == "Doctors":
+            shop_or_doctors_page("🩺 Doctors", "Doctors")
+        else:
+            contact_page()
+
+    if st.session_state.cost_estimation:
+        est = st.session_state.cost_estimation
+        st.markdown("---")
+        st.markdown("## 📊 Cost & Profit Estimation Report")
+
+        # Try JSON parse if AI returned text
+        try:
+            # Clean output in case of markdown blocks
+            if "```json" in est:
+                est = est.split("```json")[1].split("```")[0].strip()
+            elif "```" in est:
+                est = est.split("```")[1].split("```")[0].strip()
+            
+            est_json = json.loads(est)
+        except:
+            st.write("⚠️ Could not parse estimation. Raw output:")
+            st.write(est)
+            est_json = None
+
+        if est_json:
+            st.write("### 📈 Local Market Price")
+            st.write(est_json.get("market_price","N/A"))
+
+            st.write("### 📅 Price Trend & Best Months")
+            st.write(est_json.get("price_trend",""))
+            st.write("Best Months to Sell:", est_json.get("best_months", []))
+
+            st.write("### 💰 Cost & Revenue Breakdown")
+            st.write(f"Total Production Cost: {est_json.get('total_cost','')}")
+            st.write(f"Expected Revenue: {est_json.get('expected_revenue','')}")
+            st.write(f"Profit/Loss: {est_json.get('profit_or_loss','')}")
+
+            st.write("### 🚚 Travel Costs")
+            st.write(est_json.get("travel_costs",""))
+
+            st.write("### 🧠 Recommendation")
+            st.info(est_json.get("recommendation",""))
+
+    show_reports_panel()
+
+
+if __name__ == "__main__":
+    main()
